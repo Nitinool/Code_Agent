@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>贪吃蛇游戏 - Snake Game</title>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🐍 贪吃蛇游戏</h1>
+            <div class="game-info">
+                <div class="score">
+                    <span>得分: </span>
+                    <span id="score">0</span>
+                </div>
+                <div class="high-score">
+                    <span>最高分: </span>
+                    <span id="highScore">0</span>
+                </div>
+            </div>
+        </header>
+
+        <main>
+            <div class="game-container">
+                <canvas id="gameCanvas" width="400" height="400"></canvas>
+                <div class="game-overlay" id="gameOverlay">
+                    <div class="overlay-content">
+                        <h2>贪吃蛇游戏</h2>
+                        <p>使用方向键控制蛇的移动</p>
+                        <button id="startBtn" class="btn">开始游戏</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div class="control-buttons">
+                    <button id="upBtn" class="btn control-btn">↑</button>
+                    <button id="leftBtn" class="btn control-btn">←</button>
+                    <button id="downBtn" class="btn control-btn">↓</button>
+                    <button id="rightBtn" class="btn control-btn">→</button>
+                </div>
+                <div class="game-controls">
+                    <button id="pauseBtn" class="btn">暂停</button>
+                    <button id="restartBtn" class="btn">重新开始</button>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <div class="instructions">
+                <h3>游戏说明</h3>
+                <ul>
+                    <li>使用方向键或点击按钮控制蛇的移动</li>
+                    <li>吃到食物可以增加分数和蛇的长度</li>
+                    <li>撞到墙壁或自己的身体游戏结束</li>
+                    <li>按空格键可以暂停/继续游戏</li>
+                </ul>
+            </div>
+        </footer>
+    </div>
+
+    <script src="static/js/main.js"></script>
+</body>
+</html>
