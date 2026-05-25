@@ -16,6 +16,11 @@ BASE_URL = "https://aihub.cixtech.com/v1"
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_API_KEY = "sk-qauQRlz8FeTFqBoxGV7IHdErlhetZun5RA7jhXnmKZlDAHQF"
 
+# 单次回复的最大输出 token 数
+# 4096 是 GPT-3.5 时代的默认值，对现代模型 + 中文回复来说经常不够
+# 8192 在大多数场景下够用，长文档生成可以调到 16384
+DEFAULT_MAX_TOKENS = 8192
+
 # 为了向后兼容（main.py 还引用了 PROVIDER_CONFIG 和 detect_provider）
 PROVIDER_CONFIG = {
     "deepseek": {
@@ -50,7 +55,7 @@ def load_config(cwd: str = None) -> dict:
         "base_url": base_url,
         "cwd": cwd or os.getcwd(),
         "permission_mode": os.getenv("AGENT_PERMISSION", "normal"),  # normal | accept-all
-        "max_tokens": int(os.getenv("AGENT_MAX_TOKENS", "4096")),
+        "max_tokens": int(os.getenv("AGENT_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         "temperature": float(os.getenv("AGENT_TEMPERATURE", "0.7")),
     }
 

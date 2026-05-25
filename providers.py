@@ -31,6 +31,8 @@ class AssistantTurn:
     tool_calls: list[ToolCall]
     input_tokens: int = 0
     output_tokens: int = 0
+    finish_reason: str = ""   # "stop" | "length" | "tool_calls" | ""
+    truncated: bool = False   # True 表示输出被 max_tokens 截断
 
     def to_message(self) -> dict:
         """转换为中性消息格式"""
@@ -137,6 +139,12 @@ def tools_to_openai_schema(tool_schemas: list[dict]) -> list[dict]:
     return result
 
 
+# ===== 默认输出上限 =====
+# 4096 是 GPT-3.5 时代的老黄历。现代模型普遍支持 8K+ 输出。
+# 中文回复尤其耗 token（1 中文 ≈ 1.5-2 token），4096 经常不够长回答用。
+DEFAULT_MAX_TOKENS = 8192
+
+
 # ===== 核心 LLM 调用 =====
 
 def stream_llm(model: str, system: str, messages: list[dict], 
@@ -169,9 +177,10 @@ def stream_llm(model: str, system: str, messages: list[dict],
     call_kwargs = {
         "model": model,
         "messages": openai_messages,
-        "max_tokens": config.get("max_tokens", 4096),
+        "max_tokens": config.get("max_tokens", DEFAULT_MAX_TOKENS),
         "temperature": config.get("temperature", 0.7),
         "stream": True,
+        "stream_options": {"include_usage": True},  # 让最后一个 chunk 带 usage
     }
     if openai_tools:
         call_kwargs["tools"] = openai_tools
@@ -187,12 +196,25 @@ def stream_llm(model: str, system: str, messages: list[dict],
     # 解析流式响应
     content_parts = []
     tool_calls_map = {}  # index -> {id, name, arguments_str}
+    finish_reason = ""
+    input_tokens = 0
+    output_tokens = 0
     
     for chunk in stream:
+        # 末尾 usage chunk 可能没有 choices
+        if getattr(chunk, "usage", None):
+            input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+        
         if not chunk.choices:
             continue
         
-        delta = chunk.choices[0].delta
+        choice = chunk.choices[0]
+        delta = choice.delta
+        
+        # 记录结束原因（最后一个非空的 finish_reason 为准）
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
         
         # 文本内容
         if delta.content:
@@ -231,15 +253,25 @@ def stream_llm(model: str, system: str, messages: list[dict],
             params=params,
         ))
     
-    # 获取 token 使用量（从最后一个 chunk 的 usage）
-    input_tokens = 0
-    output_tokens = 0
+    # 截断检测
+    truncated = (finish_reason == "length")
+    
+    # 如果被截断，在文本末尾追加显式标记并提示用户
+    if truncated:
+        truncation_notice = (
+            f"\n\n[⚠ Output truncated at max_tokens={call_kwargs['max_tokens']}. "
+            f"Try a larger AGENT_MAX_TOKENS, or ask me to continue.]"
+        )
+        final_content += truncation_notice
+        yield TextChunk(truncation_notice)
     
     turn = AssistantTurn(
         content=final_content,
         tool_calls=final_tool_calls,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        finish_reason=finish_reason,
+        truncated=truncated,
     )
     
     yield turn
@@ -263,7 +295,7 @@ def call_llm(model: str, system: str, messages: list[dict], config: dict) -> str
         response = client.chat.completions.create(
             model=model,
             messages=openai_messages,
-            max_tokens=min(config.get("max_tokens", 4096), 2048),  # 摘要用较短输出
+            max_tokens=min(config.get("max_tokens", DEFAULT_MAX_TOKENS), 2048),  # 摘要用较短输出
             temperature=0.3,
         )
         return response.choices[0].message.content or ""
