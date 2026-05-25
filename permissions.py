@@ -4,7 +4,7 @@
 from providers import ToolCall
 
 # 只读工具白名单（自动放行）
-READONLY_TOOLS = {"Read", "Glob", "Grep", "MemoryLoad"}
+READONLY_TOOLS = {"Read", "Glob", "Grep"}
 
 # 安全的 Bash 命令前缀（自动放行）
 SAFE_BASH_PREFIXES = (

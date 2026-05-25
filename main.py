@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# main.py — CLI 入口，把所有东西串起来
-# v3: 事件驱动 + s11-s14 子系统集成
+# main.py — REPL 入口
+# 启动交互式对话循环，处理命令行参数，渲染流式输出
 
 import sys
 import os
-import threading
-import time
+import argparse
 
 # Windows 编码修复
 if sys.platform == "win32":
@@ -15,90 +14,190 @@ if sys.platform == "win32":
 # 确保可以导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import load_config
+from tools import register_builtin_tools
+register_builtin_tools()
+
+from config import load_config, detect_provider, PROVIDER_CONFIG
 from agent import (
-    AgentState, create_agent_state, run,
-    TextChunk, ToolStart, ToolEnd, TurnDone, ErrorEvent,
-    InboxDrainEvent,
+    AgentState, run_agent_turn,
+    TextEvent, ThinkingEvent, ToolCallEvent, ToolResultEvent,
+    PermissionRequestEvent, TurnEndEvent, DoneEvent,
 )
-from recovery import RecoveryEvent
-from tools import register_builtin_tools, register_memory_tools, register_task_tools, register_team_tools
-from memory import load_memory, load_memory_summary
+from permissions import format_permission_request
 from session import save_session, load_session, list_sessions, delete_session, auto_save_name
-from inbox import init_inbox, get_inbox
-from tasks import (
-    CronScheduler, list_tasks, list_runtime_tasks, list_schedules,
-    load_task, load_runtime_task,
-)
-from team import (
-    spawn_teammate, shutdown_all_teammates, get_all_teammates,
-    list_team_members, get_teammate,
-)
 
 
-# ===== 全局调度器 =====
-_scheduler: CronScheduler = None
-_inbox_notifier_running = threading.Event()
+# ===== UI 颜色（ANSI）=====
+
+C_BOLD = "\033[1m"
+C_DIM = "\033[2m"
+C_CYAN = "\033[36m"
+C_GREEN = "\033[32m"
+C_YELLOW = "\033[33m"
+C_RED = "\033[31m"
+C_MAGENTA = "\033[35m"
+C_RESET = "\033[0m"
 
 
-def _inbox_notifier_loop(state: AgentState, running: threading.Event):
-    """
-    后台收件箱通知线程 — 在 REPL 等待用户输入时实时打印收件箱消息。
-    
-    当 Cron 调度器或后台任务把消息推入 Inbox 后，
-    这个线程会在 2 秒内检测到并直接打印到终端，
-    不需要等用户发送下一条消息。
-    """
-    from inbox import get_inbox
-    
-    while running.is_set():
-        try:
-            inbox = get_inbox()
-            if inbox.has_pending():
-                msgs = inbox.drain()
-                for msg in msgs:
-                    # 打印到终端（插入到当前输入行之前）
-                    preview = msg.content[:200].replace("\n", " ")
-                    print(f"\n  📬 [{msg.from_addr}] {preview}")
-                    print("» ", end="", flush=True)  # 重新打印提示符
-        except Exception:
+def color(text: str, code: str) -> str:
+    return f"{code}{text}{C_RESET}"
+
+
+# ===== Banner & Help =====
+
+def print_banner(config: dict):
+    """打印启动横幅"""
+    print()
+    print(color("╔══════════════════════════════════════════════╗", C_CYAN))
+    print(color("║   🤖 My Agent — AI Coding Assistant         ║", C_CYAN))
+    print(color("╚══════════════════════════════════════════════╝", C_CYAN))
+    print()
+    print(f"  {color('Model:', C_DIM)}     {color(config['model'], C_BOLD)}")
+    print(f"  {color('Provider:', C_DIM)}  {config['provider']}")
+    print(f"  {color('Cwd:', C_DIM)}       {config['cwd']}")
+    print(f"  {color('Mode:', C_DIM)}      {config['permission_mode']}")
+
+    api_key = config.get("api_key", "")
+    if api_key:
+        masked = api_key[:8] + "..." if len(api_key) > 8 else "***"
+        print(f"  {color('API Key:', C_DIM)}   {masked}")
+    else:
+        print(f"  {color('API Key:', C_DIM)}   {color('⚠ NOT SET', C_RED)}")
+
+    print()
+    print(color("  Commands: /help /save /load /list /clear /model /quit", C_DIM))
+    print()
+
+
+def print_help():
+    """打印命令帮助"""
+    print("""
+Available commands:
+  /help, /h              Show this help
+  /quit, /exit, /q       Exit the agent (auto-saves conversation)
+  /clear                 Clear conversation history
+  /status                Show current status
+
+  Conversation Management:
+  /save [name]           Save current conversation (auto-name if omitted)
+  /load <name>           Load a saved conversation
+  /list                  List all saved conversations
+  /delete <name>         Delete a saved conversation
+
+  Settings:
+  /model <name>          Switch model (e.g., glm-4-plus, qwen-plus, gpt-4o)
+  /accept-all            Auto-approve all tool calls
+  /normal                Require permission for risky tool calls
+  /cwd <path>            Change working directory
+""")
+
+
+# ===== 权限请求 =====
+
+def ask_permission(tool_call) -> bool:
+    """请求用户授权"""
+    print()
+    print(color(format_permission_request(tool_call), C_YELLOW))
+    try:
+        answer = input(color("  Allow? [y/N]: ", C_YELLOW)).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in ("y", "yes")
+
+
+# ===== 事件渲染 =====
+
+def render_events(events_generator, state):
+    """渲染 agent 事件流"""
+    printed_marker = False
+
+    for event in events_generator:
+        if isinstance(event, TextEvent):
+            if not printed_marker:
+                print(color("\n🤖 ", C_GREEN), end="", flush=True)
+                printed_marker = True
+            print(event.text, end="", flush=True)
+
+        elif isinstance(event, ThinkingEvent):
+            if not printed_marker:
+                print(color("\n💭 ", C_DIM), end="", flush=True)
+                printed_marker = True
+            print(color(event.text, C_DIM), end="", flush=True)
+
+        elif isinstance(event, ToolCallEvent):
+            print()
+            print(color(f"  ⚙ {event.name}", C_MAGENTA), end="")
+            if event.name == "Read" and "file_path" in event.params:
+                print(color(f" → {event.params['file_path']}", C_DIM))
+            elif event.name == "Write" and "file_path" in event.params:
+                print(color(f" → {event.params['file_path']}", C_DIM))
+            elif event.name == "Bash" and "command" in event.params:
+                print(color(f" → {event.params['command'][:80]}", C_DIM))
+            elif event.name == "Glob" and "pattern" in event.params:
+                print(color(f" → {event.params['pattern']}", C_DIM))
+            elif event.name == "Grep" and "pattern" in event.params:
+                print(color(f" → /{event.params['pattern']}/", C_DIM))
+            else:
+                print()
+            printed_marker = False
+
+        elif isinstance(event, ToolResultEvent):
+            lines = event.result.split("\n")
+            preview_lines = lines[:5]
+            for line in preview_lines:
+                print(color(f"    {line[:120]}", C_DIM))
+            if len(lines) > 5:
+                print(color(f"    ... ({len(lines) - 5} more lines)", C_DIM))
+
+        elif isinstance(event, PermissionRequestEvent):
+            # 在 ask_permission 回调中处理
             pass
-        time.sleep(2)
+
+        elif isinstance(event, TurnEndEvent):
+            if event.has_more:
+                printed_marker = False
+
+        elif isinstance(event, DoneEvent):
+            print()
+            return
 
 
 # ===== 斜杠命令处理 =====
 
-def handle_slash_command(cmd_raw: str, state: AgentState, config: dict) -> bool:
+def handle_command(cmd_raw: str, state: AgentState, config: dict) -> bool:
     """
-    处理斜杠命令。返回 True 表示已处理，False 表示退出。
+    处理斜杠命令。
+    返回 False 表示退出程序，True 表示继续。
     """
-    global _scheduler
-    
     cmd_raw = cmd_raw.strip()
-    cmd = cmd_raw.lower()
-    
-    if cmd in ("/exit", "/quit", "/q"):
-        # 自动保存当前对话（如果有内容）
+    parts = cmd_raw.split(maxsplit=1)
+    if not parts:
+        return True
+
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in ("/quit", "/exit", "/q"):
         if state.messages:
             name = auto_save_name()
-            result = save_session(name, state.messages, config)
-            print(f"  Auto-saved: {result}")
-        # 停止调度器
-        if _scheduler:
-            _scheduler.stop()
-        print("Goodbye!")
+            try:
+                save_session(name, state.messages, config)
+                print(color(f"  💾 Auto-saved as '{name}'", C_GREEN))
+            except Exception as e:
+                print(color(f"  ⚠ Auto-save failed: {e}", C_YELLOW))
+        print(color("  👋 Goodbye!", C_GREEN))
         return False
-    
-    elif cmd in ("/clear", "/reset"):
+
+    elif cmd in ("/help", "/h", "/?"):
+        print_help()
+
+    elif cmd == "/clear":
         state.messages.clear()
         state.turn_count = 0
         state.total_input_tokens = 0
         state.total_output_tokens = 0
-        print("  ✓ Conversation cleared.")
-    
-    elif cmd in ("/help", "/h", "/?"):
-        print_help()
-    
+        print(color("  🧹 Conversation cleared.", C_GREEN))
+
     elif cmd == "/status":
         print(f"  Model: {config.get('model', 'unknown')}")
         print(f"  Provider: {config.get('provider', 'unknown')}")
@@ -106,426 +205,172 @@ def handle_slash_command(cmd_raw: str, state: AgentState, config: dict) -> bool:
         print(f"  Permission mode: {config.get('permission_mode', 'normal')}")
         print(f"  Messages: {len(state.messages)}")
         print(f"  Turn count: {state.turn_count}")
-        print(f"  Total tokens: {state.total_input_tokens} in / {state.total_output_tokens} out")
-        # 显示收件箱状态
-        inbox = get_inbox()
-        if inbox.pending_count() > 0:
-            print(f"  Inbox: {inbox.pending_count()} pending messages")
-    
-    elif cmd == "/accept-all":
-        config["permission_mode"] = "accept-all"
-        print("  ✓ Switched to accept-all mode. All tool calls will be auto-approved.")
-    
-    elif cmd == "/normal":
-        config["permission_mode"] = "normal"
-        print("  ✓ Switched to normal mode. Tool calls need permission.")
-    
-    elif cmd.startswith("/model "):
-        model = cmd.split(" ", 1)[1].strip()
-        config["model"] = model
-        # 更新 provider
-        from config import detect_provider, PROVIDER_CONFIG
-        provider = detect_provider(model)
-        config["provider"] = provider
-        pconf = PROVIDER_CONFIG[provider]
-        config["base_url"] = pconf["base_url"]
-        print(f"  ✓ Switched to model: {model} (provider: {provider})")
-    
-    elif cmd.startswith("/cwd "):
-        new_cwd = cmd.split(" ", 1)[1].strip()
-        if os.path.isdir(new_cwd):
-            config["cwd"] = os.path.abspath(new_cwd)
-            # 重启调度器到新目录
-            if _scheduler:
-                _scheduler.stop()
-            _scheduler = CronScheduler(config["cwd"])
-            _scheduler.start()
-            print(f"  ✓ Working directory: {config['cwd']}")
-        else:
-            print(f"  ✗ Directory not found: {new_cwd}")
-    
-    elif cmd == "/memory":
-        mem_summary = load_memory_summary()
-        if mem_summary:
-            print(f"  {mem_summary}")
-        else:
-            print("  No memories saved yet.")
-    
-    # ===== 收件箱命令 =====
-    elif cmd == "/inbox":
-        inbox = get_inbox()
-        count = inbox.pending_count()
-        if count > 0:
-            print(f"  {count} pending message(s) in inbox.")
-            msgs = inbox.drain()
-            for msg in msgs:
-                preview = msg.content[:100].replace("\n", " ")
-                print(f"  [{msg.from_addr}] {preview}...")
-        else:
-            print("  Inbox is empty.")
-    
-    # ===== 任务管理命令 =====
-    elif cmd in ("/tasks", "/task-list"):
-        cwd = config.get("cwd", ".")
-        tasks = list_tasks(cwd)
-        if not tasks:
-            print("  No tasks.")
-        else:
-            print(f"  Tasks ({len(tasks)}):")
-            for t in tasks:
-                ready = " ✓" if t.status == "pending" and not t.blockedBy else ""
-                owner = f" → {t.owner}" if t.owner else ""
-                print(f"    {t.id}  [{t.status}]{ready}  {t.subject}{owner}")
-    
-    elif cmd in ("/bg", "/background"):
-        cwd = config.get("cwd", ".")
-        rts = list_runtime_tasks(cwd)
-        if not rts:
-            print("  No background tasks.")
-        else:
-            running = [r for r in rts if r.status == "running"]
-            done = [r for r in rts if r.status != "running"]
-            if running:
-                print(f"  Running ({len(running)}):")
-                for r in running:
-                    print(f"    {r.id}  {r.command[:60]}")
-            if done:
-                print(f"  Recent ({min(len(done), 10)}):")
-                for r in done[:10]:
-                    emoji = "✓" if r.status == "completed" else "✗"
-                    print(f"    {emoji} {r.id}  [{r.status}]  {r.command[:50]}")
-    
-    elif cmd in ("/schedules", "/cron"):
-        cwd = config.get("cwd", ".")
-        schedules = list_schedules(cwd)
-        if not schedules:
-            print("  No schedules.")
-        else:
-            print(f"  Schedules ({len(schedules)}):")
-            for s in schedules:
-                enabled = "ON" if s.enabled else "OFF"
-                last = s.last_fired_at or "never"
-                print(f"    {s.id}  [{enabled}]  {s.cron_expr}  \"{s.prompt[:40]}\"  last: {last}")
-    
-    # ===== 对话管理 =====
+
     elif cmd == "/save":
-        name = auto_save_name()
-        result = save_session(name, state.messages, config)
-        print(f"  ✓ {result}")
-    
-    elif cmd.startswith("/save "):
-        name = cmd_raw.split(" ", 1)[1].strip()
-        result = save_session(name, state.messages, config)
-        print(f"  ✓ {result}")
-    
-    elif cmd.startswith("/load "):
-        name = cmd_raw.split(" ", 1)[1].strip()
-        session_data = load_session(name)
-        if session_data is None:
-            print(f"  ✗ Session not found: {name}")
-            print(f"  Use /sessions to list available sessions.")
+        name = arg or auto_save_name()
+        try:
+            result = save_session(name, state.messages, config)
+            print(color(f"  💾 {result}", C_GREEN))
+        except Exception as e:
+            print(color(f"  ✗ Save failed: {e}", C_RED))
+
+    elif cmd == "/load":
+        if not arg:
+            print(color("  Usage: /load <name>", C_RED))
+            return True
+        data = load_session(arg)
+        if data is None:
+            print(color(f"  ✗ Session not found: {arg}", C_RED))
+            print(color(f"  Use /list to see available sessions.", C_DIM))
         else:
-            state.messages = session_data.get("messages", [])
+            state.messages = data.get("messages", [])
             state.turn_count = 0
             state.total_input_tokens = 0
             state.total_output_tokens = 0
-            msg_count = len(state.messages)
-            summary = session_data.get("summary", "")
-            saved_model = session_data.get("model", "")
-            saved_at = session_data.get("created_at", "")
-            print(f"  ✓ Loaded session: {session_data.get('name', name)}")
-            print(f"    Saved at: {saved_at}")
-            print(f"    Model: {saved_model}")
-            print(f"    Messages: {msg_count}")
-            if summary:
-                print(f"    Summary: {summary}")
-    
-    elif cmd in ("/sessions", "/history"):
+            print(color(f"  📂 Loaded '{data.get('name', arg)}' ({data.get('message_count', 0)} messages)", C_GREEN))
+            if data.get("summary"):
+                print(color(f"    Summary: {data['summary']}", C_DIM))
+
+    elif cmd in ("/list", "/sessions", "/history"):
         sessions = list_sessions()
         if not sessions:
-            print("  No saved sessions.")
+            print(color("  No saved sessions.", C_DIM))
         else:
-            print(f"  Saved sessions ({len(sessions)}):")
-            print(f"  {'No.':<4} {'Name':<35} {'Date':<20} {'Msgs':<6} {'Summary'}")
-            print(f"  {'-'*4} {'-'*35} {'-'*20} {'-'*6} {'-'*30}")
-            for i, s in enumerate(sessions, 1):
-                name = s["name"][:33]
-                date = s.get("created_at", "")[:19]
-                msgs = str(s.get("message_count", 0))
-                summary = s.get("summary", "")[:28]
-                print(f"  {i:<4} {name:<35} {date:<20} {msgs:<6} {summary}")
             print()
-            print("  Use /load <name> to load a session.")
-    
-    elif cmd.startswith("/delete-session "):
-        name = cmd_raw.split(" ", 1)[1].strip()
-        result = delete_session(name)
-        print(f"  {result}")
-    
-    # ===== 团队管理命令 =====
-    elif cmd in ("/team", "/teammates"):
-        members = list_team_members(config["cwd"])
-        active = get_all_teammates()
-        if not members:
-            print("  No team members. Use /team-init to spawn default workers.")
+            print(color(f"  📚 Saved sessions ({len(sessions)}):", C_BOLD))
+            for s in sessions:
+                date = s.get("created_at", "")[:16]
+                msgs = s.get("message_count", 0)
+                print(f"    {color(s['name'], C_CYAN)} - {msgs} msgs - {color(date, C_DIM)}")
+                if s.get("summary"):
+                    print(f"      {color(s['summary'], C_DIM)}")
+            print()
+
+    elif cmd == "/delete":
+        if not arg:
+            print(color("  Usage: /delete <name>", C_RED))
+            return True
+        result = delete_session(arg)
+        print(color(f"  🗑 {result}", C_GREEN))
+
+    elif cmd == "/accept-all":
+        config["permission_mode"] = "accept-all"
+        print(color("  ✓ Switched to accept-all mode.", C_GREEN))
+
+    elif cmd == "/normal":
+        config["permission_mode"] = "normal"
+        print(color("  ✓ Switched to normal mode (will ask permission).", C_GREEN))
+
+    elif cmd == "/model":
+        if not arg:
+            print(color(f"  Current model: {config['model']}", C_CYAN))
+            print(color("  Usage: /model <name>  (e.g., glm-4-plus, qwen-plus, gpt-4o)", C_DIM))
+            return True
+        config["model"] = arg
+        provider = detect_provider(arg)
+        config["provider"] = provider
+        pconf = PROVIDER_CONFIG[provider]
+        config["base_url"] = pconf["base_url"]
+        config["api_key"] = os.getenv(pconf["env_key"], config.get("api_key", ""))
+        print(color(f"  ✓ Switched to model: {arg} (provider: {provider})", C_GREEN))
+        if not config["api_key"]:
+            print(color(f"  ⚠ API key not set for {provider} (env: {pconf['env_key']})", C_YELLOW))
+
+    elif cmd == "/cwd":
+        if not arg:
+            print(color(f"  Current cwd: {config['cwd']}", C_CYAN))
+            return True
+        if os.path.isdir(arg):
+            config["cwd"] = os.path.abspath(arg)
+            print(color(f"  ✓ Working directory: {config['cwd']}", C_GREEN))
         else:
-            print(f"  Team Members ({len(members)}, {len(active)} active):")
-            for m in members:
-                h = active.get(m.name)
-                if h:
-                    info = h.get_info()
-                    task_str = f"task={info['current_task']}" if info['current_task'] else "idle"
-                    print(f"    {m.name}  [{info['status']}]  {m.role}  {task_str}  inbox={info['pending_inbox']}")
-                else:
-                    print(f"    {m.name}  [offline]  {m.role}")
-    
-    elif cmd == "/team-init":
-        active = get_all_teammates()
-        spawned = []
-        worker_configs = [
-            ("worker-1", "worker", "Coder - writes and modifies code"),
-            ("worker-2", "worker", "Reviewer - reviews code and runs tests"),
-        ]
-        for name, role, desc in worker_configs:
-            if name not in active:
-                try:
-                    handle = spawn_teammate(config["cwd"], name, role, desc, config)
-                    spawned.append(name)
-                except Exception as e:
-                    print(f"  ✗ Failed to spawn {name}: {e}")
-            else:
-                print(f"  {name} is already running")
-        if spawned:
-            print(f"  ✓ Spawned: {', '.join(spawned)}")
-    
-    elif cmd == "/team-stop":
-        active = get_all_teammates()
-        if not active:
-            print("  No active teammates.")
-        else:
-            shutdown_all_teammates()
-            print(f"  ✓ Shut down: {', '.join(active.keys())}")
-    
+            print(color(f"  ✗ Directory not found: {arg}", C_RED))
+
     else:
-        print(f"  Unknown command: {cmd}")
-        print("  Type /help for available commands.")
-    
+        print(color(f"  Unknown command: {cmd}", C_RED))
+        print(color("  Type /help for available commands.", C_DIM))
+
     return True
-
-
-def print_help():
-    """打印帮助信息"""
-    print("""
-Available commands:
-  /help, /h              Show this help
-  /exit, /quit, /q       Exit the agent (auto-saves conversation)
-  /clear, /reset         Clear conversation history
-  /status                Show current status
-
-  Conversation Management:
-  /save [name]           Save current conversation (auto-name if omitted)
-  /load <name>           Load a saved conversation
-  /sessions              List all saved conversations
-  /delete-session <name> Delete a saved conversation
-
-  Task & Background:
-  /tasks                 List work graph tasks
-  /bg                    List background runtime tasks
-  /schedules             List cron schedules
-  /inbox                 Show and drain pending inbox messages
-
-  Memory:
-  /memory                Show saved user preferences
-
-  Settings:
-  /accept-all            Auto-approve all tool calls
-  /normal                Require permission for tool calls
-  /model <name>          Switch model (e.g., /model glm-4, /model qwen-plus)
-  /cwd <path>            Change working directory
-
-Tips:
-  - BackgroundRun tool executes long commands without blocking the REPL
-  - TaskCreate/TaskComplete manage a persistent work graph with dependencies
-  - ScheduleCreate sets up cron-triggered prompts (e.g., '*/5 * * * *' every 5 min)
-  - Recovery from LLM errors (rate limit, timeout, context overflow) is automatic
-""")
-
-
-def print_banner(config: dict):
-    """打印启动横幅"""
-    print()
-    print("╔══════════════════════════════════════════╗")
-    print("║     My Agent - Autonomous Agent v3       ║")
-    print("╚══════════════════════════════════════════╝")
-    print(f"  Model: {config.get('model', 'unknown')}")
-    print(f"  Provider: {config.get('provider', 'unknown')}")
-    print(f"  Working directory: {config.get('cwd', '.')}")
-    print(f"  Permission: {config.get('permission_mode', 'normal')}")
-    
-    api_key = config.get("api_key", "")
-    if api_key:
-        masked = api_key[:8] + "..." if len(api_key) > 8 else "***"
-        print(f"  API Key: {masked}")
-    else:
-        print("  ⚠ API Key not set!")
-    
-    # 显示子系统状态
-    print(f"  Subsystems: Recovery(s11) ✓ | WorkGraph(s12) ✓ | Background(s13) ✓ | Scheduler(s14) ✓ | Team(s15-s17) ✓")
-    
-    print()
-    print("  Type your message, or /help for commands.")
-    print()
 
 
 # ===== 主入口 =====
 
 def main():
     """主 REPL 循环"""
-    global _scheduler
-    
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="My Agent - Autonomous Agent v3")
-    parser.add_argument("--model", "-m", help="Model name (e.g., qwen-plus, glm-4-plus)")
+    parser = argparse.ArgumentParser(description="My Agent - AI Coding Assistant")
+    parser.add_argument("--model", "-m", help="Model name (e.g., qwen-plus, glm-4-plus, gpt-4o)")
     parser.add_argument("--cwd", "-d", help="Working directory", default=os.getcwd())
     parser.add_argument("--accept-all", "-a", action="store_true", help="Auto-approve all tool calls")
     parser.add_argument("--provider", "-p", help="Provider (qwen, zhipu, openai)")
     args = parser.parse_args()
-    
+
     # 加载配置
     config = load_config(cwd=args.cwd)
-    
+
     # 命令行参数覆盖
     if args.model:
         config["model"] = args.model
-        from config import detect_provider, PROVIDER_CONFIG
         provider = detect_provider(args.model)
         config["provider"] = provider
         pconf = PROVIDER_CONFIG[provider]
         config["base_url"] = pconf["base_url"]
-    
+        config["api_key"] = os.getenv(pconf["env_key"], config.get("api_key", ""))
+
     if args.provider:
         config["provider"] = args.provider
-        from config import PROVIDER_CONFIG
         pconf = PROVIDER_CONFIG.get(args.provider, {})
         config["base_url"] = pconf.get("base_url")
-    
+
     if args.accept_all:
         config["permission_mode"] = "accept-all"
-    
-    # ===== 初始化子系统 =====
-    
-    # 初始化收件箱
-    inbox = init_inbox()
-    
-    # 注册所有工具（包括 s12/s13/s14）
-    register_builtin_tools()
-    register_memory_tools()
-    register_task_tools()
-    register_team_tools()
-    
-    # 创建 AgentState（含收件箱和恢复预算）
-    state = create_agent_state(inbox=inbox)
-    
-    # 加载记忆到 config
-    config["_memory"] = load_memory()
-    
-    # 启动 Cron 调度器 (s14)
-    _scheduler = CronScheduler(config["cwd"], check_interval=30)
-    _scheduler.start()
-    
+
+    # 创建 AgentState
+    state = AgentState()
+
     # 打印横幅
     print_banner(config)
-    
-    # 检查 API Key
+
     if not config.get("api_key"):
-        print("  ⚠ WARNING: API key is not configured!")
-        print(f"  Please set environment variable or create .env file:")
-        print(f"    QWEN_API_KEY=xxx     (for Qwen)")
-        print(f"    ZHIPU_API_KEY=xxx    (for GLM)")
+        print(color("  ⚠ WARNING: API key is not configured!", C_YELLOW))
+        print(color("  Set the appropriate environment variable or create a .env file:", C_DIM))
+        print(color("    QWEN_API_KEY=xxx     (for Qwen / Tongyi)", C_DIM))
+        print(color("    ZHIPU_API_KEY=xxx    (for GLM / Zhipu)", C_DIM))
+        print(color("    OPENAI_API_KEY=xxx   (for OpenAI GPT)", C_DIM))
         print()
-    
-    # 启动后台收件箱通知线程（在 REPL 等待输入时实时打印通知）
-    _inbox_notifier_running.set()
-    notifier_thread = threading.Thread(
-        target=_inbox_notifier_loop,
-        args=(state, _inbox_notifier_running),
-        daemon=True,
-        name="inbox-notifier",
-    )
-    notifier_thread.start()
-    
+
     # REPL 循环
     while True:
         try:
-            user_input = input("» ").strip()
+            user_input = input(color("» ", C_CYAN)).strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
+            print()
+            print(color("  👋 Goodbye!", C_GREEN))
             break
-        
+
         if not user_input:
             continue
-        
+
         # 斜杠命令
         if user_input.startswith("/"):
-            should_continue = handle_slash_command(user_input, state, config)
-            if not should_continue:
+            if not handle_command(user_input, state, config):
                 break
             continue
-        
+
         # 运行 Agent
         try:
-            for event in run(user_input, state, config):
-                if isinstance(event, TextChunk):
-                    print(event.text, end="", flush=True)
-                
-                elif isinstance(event, RecoveryEvent):
-                    # 恢复事件
-                    print(f"\n  🔄 {event.message}")
-                
-                elif isinstance(event, InboxDrainEvent):
-                    # 收件箱排空事件
-                    print(f"\n  📬 Inbox: {event.count} message(s) drained")
-                    for preview in event.previews:
-                        print(f"    {preview}")
-                
-                elif isinstance(event, ToolStart):
-                    param_preview = ""
-                    if event.params:
-                        first_val = list(event.params.values())[0] if event.params else ""
-                        if isinstance(first_val, str):
-                            param_preview = first_val[:60]
-                            if len(first_val) > 60:
-                                param_preview += "..."
-                        elif isinstance(first_val, list):
-                            param_preview = f"[{len(first_val)} items]"
-                    print(f"\n  ⚙ {event.name}({param_preview})")
-                
-                elif isinstance(event, ToolEnd):
-                    result_len = len(event.result)
-                    print(f"  ✓ {event.name} → {result_len} chars")
-                    if event.name in ("Bash",) and result_len < 500:
-                        for line in event.result.strip().split("\n"):
-                            print(f"    {line}")
-                
-                elif isinstance(event, TurnDone):
-                    if state.total_input_tokens or state.total_output_tokens:
-                        print(f"\n  [turns: {state.turn_count}]")
-                
-                elif isinstance(event, ErrorEvent):
-                    print(f"\n  ✗ {event.message}")
+            events = run_agent_turn(
+                state=state,
+                user_input=user_input,
+                config=config,
+                permission_callback=ask_permission,
+            )
+            render_events(events, state)
         except KeyboardInterrupt:
-            print("\n  [Interrupted]")
+            print()
+            print(color("  [Interrupted]", C_YELLOW))
         except Exception as e:
-            print(f"\n  ✗ Unexpected error: {e}")
-        
-        print()  # 空行分隔
-    
-    # 清理
-    _inbox_notifier_running.clear()
-    shutdown_all_teammates()
-    if _scheduler:
-        _scheduler.stop()
+            print()
+            print(color(f"  ✗ Unexpected error: {e}", C_RED))
 
 
 if __name__ == "__main__":

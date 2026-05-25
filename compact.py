@@ -1,8 +1,5 @@
 # compact.py — 上下文压缩
 # 两级压缩：微压缩（截断旧 tool_result）+ 摘要压缩（LLM 总结）
-# s11 增加：force_compact() 供 Recovery State Machine 强制调用
-
-from dataclasses import dataclass
 
 
 # ===== Token 估算 =====
@@ -38,24 +35,41 @@ def estimate_tokens(messages: list[dict]) -> int:
 # ===== 模型上下文限制 =====
 
 CONTEXT_LIMITS = {
-    "qwen-plus": 131072,
-    "qwen-max": 32768,
-    "qwen-turbo": 131072,
-    "qwen-long": 10000000,
-    "glm-4-plus": 128000,
-    "glm-4": 128000,
-    "glm-4-flash": 128000,
-    "gpt-4o": 128000,
-    "gpt-4": 128000,
-    "gpt-3.5-turbo": 16385,
+    # DeepSeek（默认，cixtech 端点）— V4-Pro 支持 1M 上下文
+    "deepseek-v4-pro": 1_000_000,
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    # Qwen / 通义千问
+    "qwen-plus": 131_072,
+    "qwen-max": 32_768,
+    "qwen-turbo": 131_072,
+    "qwen-long": 10_000_000,
+    # GLM / 智谱清言
+    "glm-4-plus": 128_000,
+    "glm-4": 128_000,
+    "glm-4-flash": 128_000,
+    # OpenAI
+    "gpt-4o": 128_000,
+    "gpt-4": 128_000,
+    "gpt-3.5-turbo": 16_385,
 }
 
-DEFAULT_CONTEXT_LIMIT = 128000
+# 默认上下文限制（未知模型 fallback）
+DEFAULT_CONTEXT_LIMIT = 128_000
+
+# 默认模型（与 config.py 保持一致）
+DEFAULT_MODEL = "deepseek-v4-pro"
 
 
 def get_context_limit(model: str) -> int:
-    """获取模型的上下文窗口限制"""
-    return CONTEXT_LIMITS.get(model, DEFAULT_CONTEXT_LIMIT)
+    """获取模型的上下文窗口限制（支持前缀匹配，例如 deepseek-v4-pro-xxx）"""
+    if model in CONTEXT_LIMITS:
+        return CONTEXT_LIMITS[model]
+    # 前缀匹配：处理带版本号/后缀的模型名
+    for known_model, limit in CONTEXT_LIMITS.items():
+        if model.startswith(known_model):
+            return limit
+    return DEFAULT_CONTEXT_LIMIT
 
 
 # ===== 压缩逻辑 =====
@@ -67,7 +81,7 @@ def maybe_compact(state, config: dict):
     state: AgentState（有 messages 属性）
     config: 配置字典
     """
-    model = config.get("model", "qwen-plus")
+    model = config.get("model", DEFAULT_MODEL)
     limit = get_context_limit(model)
     usage = estimate_tokens(state.messages)
     
@@ -81,19 +95,6 @@ def maybe_compact(state, config: dict):
     # 层级 2: 摘要压缩 — 如果微压缩还不够
     if estimate_tokens(state.messages) > limit * 0.8:
         summary_compact(state, config)
-
-
-def force_compact(state, config: dict):
-    """
-    强制压缩 — 供 Recovery State Machine (s11) 在 prompt_too_long 时调用。
-    无论当前 token 使用量如何，强制执行两级压缩。
-    """
-    # 层级 1: 微压缩 — 截断旧的 tool_result（更激进：keep_last_n=3, max_chars=1000）
-    snip_old_results(state.messages, keep_last_n=3, max_chars=1000)
-    
-    # 层级 2: 摘要压缩（保留更少的最近消息：20%）
-    if len(state.messages) >= 4:
-        summary_compact_aggressive(state, config)
 
 
 def snip_old_results(messages: list[dict], keep_last_n: int = 6, max_chars: int = 2000):
@@ -166,7 +167,7 @@ def _llm_summarize(messages: list[dict], config: dict) -> str:
         ]
         
         return call_llm(
-            model=config.get("model", "qwen-plus"),
+            model=config.get("model", DEFAULT_MODEL),
             system="You are a conversation summarizer. Be concise but capture all important details.",
             messages=summarize_messages,
             config=config,
@@ -188,27 +189,6 @@ def _messages_to_text(messages: list[dict]) -> str:
                 content = content[:500] + "..."
             lines.append(f"[{role}]: {content}")
     return "\n".join(lines)
-
-
-def summary_compact_aggressive(state, config: dict):
-    """
-    激进摘要压缩 — 用于 force_compact。
-    保留最近 20% 的消息（而非 30%）。
-    """
-    if len(state.messages) < 4:
-        return
-    
-    split = max(2, len(state.messages) * 8 // 10)
-    old_messages = state.messages[:split]
-    recent_messages = state.messages[split:]
-    
-    summary = _llm_summarize(old_messages, config)
-    
-    state.messages = [
-        {"role": "user", "content": f"[Forced Context Summary (recovery from prompt_too_long)]\n{summary}"},
-        {"role": "assistant", "content": "Understood. I have the compressed context and will continue from here."},
-        *recent_messages,
-    ]
 
 
 def _fallback_summarize(messages: list[dict]) -> str:
