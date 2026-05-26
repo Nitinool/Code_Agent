@@ -140,9 +140,10 @@ def tools_to_openai_schema(tool_schemas: list[dict]) -> list[dict]:
 
 
 # ===== 默认输出上限 =====
-# 4096 是 GPT-3.5 时代的老黄历。现代模型普遍支持 8K+ 输出。
-# 中文回复尤其耗 token（1 中文 ≈ 1.5-2 token），4096 经常不够长回答用。
-DEFAULT_MAX_TOKENS = 8192
+# 历史演进：4096 (GPT-3.5 时代) → 8192 (够用但聊嗨会断) → 16384 (当前)
+# 中文回复尤其耗 token（1 中文 ≈ 1.5-2 token），所以中文长回答场景需要更大值。
+# 真正权威的默认值定义在 config.py，这里只是 fallback 用。
+DEFAULT_MAX_TOKENS = 16384
 
 
 # ===== 核心 LLM 调用 =====

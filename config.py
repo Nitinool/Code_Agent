@@ -17,9 +17,11 @@ DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_API_KEY = "sk-qauQRlz8FeTFqBoxGV7IHdErlhetZun5RA7jhXnmKZlDAHQF"
 
 # 单次回复的最大输出 token 数
-# 4096 是 GPT-3.5 时代的默认值，对现代模型 + 中文回复来说经常不够
-# 8192 在大多数场景下够用，长文档生成可以调到 16384
-DEFAULT_MAX_TOKENS = 8192
+# 历史演进：4096 (GPT-3.5 时代) → 8192 (够用但聊嗨会断) → 16384 (当前)
+# 已实测 cixtech 端点接受到 131072 也不报错，但模型实际能稳定生成的长度
+# 通常在 16K-32K 区间，再高会变慢且不一定真的输出那么多。
+# 短回答场景设小一点更快；长文档生成可以调到 32768。
+DEFAULT_MAX_TOKENS = 16384
 
 # 为了向后兼容（main.py 还引用了 PROVIDER_CONFIG 和 detect_provider）
 PROVIDER_CONFIG = {
