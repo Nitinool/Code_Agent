@@ -34,6 +34,7 @@ SYSTEM_PROMPT_TEMPLATE = """You are a helpful coding assistant with access to to
 - For multi-file changes, plan first, then execute step by step.
 - If a command fails, read the error carefully and fix it.
 {project_rules}
+{active_skills}
 """
 
 
@@ -64,12 +65,12 @@ def _get_git_info(cwd: str) -> str:
 
 
 def build_system_prompt(config: dict) -> str:
-    """动态构建 System Prompt — 注入日期/工作目录/平台/git 状态/项目规则"""
+    """动态构建 System Prompt — 注入日期/工作目录/平台/git 状态/项目规则/已激活 skill"""
     cwd = config.get("cwd", os.getcwd())
 
     git_info = _get_git_info(cwd)
 
-    # 项目规则（README.md 或 CLAUDE.md）
+    # 项目规则（CLAUDE.md 或 AGENT.md）
     project_rules = ""
     for fname in ("CLAUDE.md", "AGENT.md"):
         rule_file = Path(cwd) / fname
@@ -83,10 +84,23 @@ def build_system_prompt(config: dict) -> str:
             except Exception:
                 pass
 
+    # 已激活的 Skills
+    active_skills = ""
+    active_names = config.get("active_skills", [])
+    if active_names:
+        try:
+            from skills import get_active_skill_contents
+            skills_content = get_active_skill_contents(active_names, cwd)
+            if skills_content:
+                active_skills = f"\n## Active Skills\n\nThe following skills are active. Follow their instructions carefully.\n{skills_content}"
+        except Exception:
+            pass
+
     return SYSTEM_PROMPT_TEMPLATE.format(
         date=datetime.now().strftime("%Y-%m-%d %H:%M"),
         cwd=cwd,
         platform=sys.platform,
         git_info=git_info,
         project_rules=project_rules,
+        active_skills=active_skills,
     )

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tools import register_builtin_tools
 register_builtin_tools()
 
-from config import load_config, detect_provider, PROVIDER_CONFIG
+from config import load_config, save_config, detect_provider, PROVIDER_CONFIG
 from agent import (
     AgentState, run_agent_turn,
     TextEvent, ThinkingEvent, ToolCallEvent, ToolResultEvent,
@@ -25,6 +25,7 @@ from agent import (
 )
 from permissions import format_permission_request
 from session import save_session, load_session, list_sessions, delete_session, auto_save_name
+from skills import list_skills, list_namespaces, resolve_skill_name, load_skills, get_namespace_skills
 
 
 # ===== UI 颜色（ANSI）=====
@@ -64,8 +65,12 @@ def print_banner(config: dict):
     else:
         print(f"  {color('API Key:', C_DIM)}   {color('⚠ NOT SET', C_RED)}")
 
+    active = config.get("active_skills", [])
+    if active:
+        print(f"  {color('Skills:', C_DIM)}    {len(active)} active ({', '.join(active[:3])}{'...' if len(active) > 3 else ''})")
+
     print()
-    print(color("  Commands: /help /save /load /list /clear /model /quit", C_DIM))
+    print(color("  Commands: /help /save /load /list /clear /model /skill /quit", C_DIM))
     print()
 
 
@@ -83,6 +88,12 @@ Available commands:
   /load <name>           Load a saved conversation
   /list                  List all saved conversations
   /delete <name>         Delete a saved conversation
+
+  Skills:
+  /skill list            List all available skills (grouped by namespace)
+  /skill info <name>     Show skill details
+  /skill enable <name>   Enable a skill or namespace (e.g., "superpowers")
+  /skill disable <name>  Disable a skill or namespace
 
   Settings:
   /model <name>          Switch model (e.g., glm-4-plus, qwen-plus, gpt-4o)
@@ -150,7 +161,6 @@ def render_events(events_generator, state):
                 print(color(f"    ... ({len(lines) - 5} more lines)", C_DIM))
 
         elif isinstance(event, PermissionRequestEvent):
-            # 在 ask_permission 回调中处理
             pass
 
         elif isinstance(event, TurnEndEvent):
@@ -160,6 +170,164 @@ def render_events(events_generator, state):
         elif isinstance(event, DoneEvent):
             print()
             return
+
+
+# ===== Skill 命令处理 =====
+
+def _handle_skill_command(arg: str, config: dict) -> None:
+    """处理 /skill <subcommand> [args]"""
+    parts = arg.split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+    subarg = parts[1].strip() if len(parts) > 1 else ""
+
+    cwd = config.get("cwd")
+    active = config.get("active_skills", [])
+
+    if subcmd == "list":
+        skills = list_skills(cwd)
+        namespaces = list_namespaces(cwd)
+        if not skills:
+            print(color("  No skills found.", C_DIM))
+            print(color("  Place skills in skills/<namespace>/<name>/SKILL.md", C_DIM))
+            return
+
+        # 按命名空间分组显示
+        ns_active = {}  # namespace → active_count
+        for ns_info in namespaces:
+            ns = ns_info["namespace"]
+            ns_skills = ns_info["skills"]
+            ns_active[ns] = sum(1 for s in ns_skills if s in active)
+
+        print()
+        for ns_info in namespaces:
+            ns = ns_info["namespace"]
+            count = ns_info["skill_count"]
+            a_count = ns_active.get(ns, 0)
+            ns_status = color("✓", C_GREEN) if a_count == count else color(f"{a_count}/{count}", C_YELLOW) if a_count > 0 else color("○", C_DIM)
+            print(f"  {ns_status} {color(ns, C_BOLD)} ({count} skills)")
+            for full_name in ns_info["skills"]:
+                from skills import get_skill
+                s = get_skill(full_name, cwd)
+                if s:
+                    s_status = color("✓", C_GREEN) if full_name in active else color("○", C_DIM)
+                    short = s.name
+                    desc = s.description[:80] + "..." if len(s.description) > 80 else s.description
+                    print(f"      {s_status} {color(short, C_CYAN)} — {color(desc, C_DIM)}")
+        print()
+
+    elif subcmd == "info":
+        if not subarg:
+            print(color("  Usage: /skill info <name>", C_RED))
+            return
+        resolved = resolve_skill_name(subarg, cwd)
+        if not resolved:
+            print(color(f"  ✗ Skill not found: {subarg}", C_RED))
+            return
+        from skills import get_skill
+        skill = get_skill(resolved, cwd)
+        if not skill:
+            print(color(f"  ✗ Skill not found: {resolved}", C_RED))
+            return
+        is_active = resolved in active
+        status = color("✓ active", C_GREEN) if is_active else color("○ inactive", C_DIM)
+        print()
+        print(color(f"  🧩 {skill.full_name}  {status}", C_BOLD))
+        print(f"  {color('Source:', C_DIM)}  {skill.source} ({skill.path})")
+        print(f"  {color('Description:', C_DIM)} {skill.description}")
+        body_lines = skill.body.strip().split("\n")
+        preview = "\n".join(body_lines[:20])
+        if len(body_lines) > 20:
+            preview += f"\n  ... ({len(body_lines) - 20} more lines)"
+        print(color(f"\n  --- Preview ---", C_DIM))
+        for line in preview.split("\n"):
+            print(f"  {color(line[:120], C_DIM)}")
+        print()
+
+    elif subcmd == "enable":
+        if not subarg:
+            print(color("  Usage: /skill enable <name|namespace>", C_RED))
+            return
+
+        resolved = resolve_skill_name(subarg, cwd)
+
+        # 检查是否是命名空间
+        namespaces = list_namespaces(cwd)
+        ns_names = [n["namespace"] for n in namespaces]
+        is_namespace = subarg in ns_names
+
+        if is_namespace:
+            # 启用整个命名空间
+            ns_skills = get_namespace_skills(subarg, cwd)
+            new_skills = [s for s in ns_skills if s not in active]
+            if not new_skills:
+                print(color(f"  All skills in '{subarg}' are already active.", C_YELLOW))
+                return
+            active.extend(new_skills)
+            config["active_skills"] = active
+            save_config(config)
+            print(color(f"  ✓ Enabled namespace '{subarg}' ({len(new_skills)} skills):", C_GREEN))
+            for s in new_skills:
+                print(color(f"    + {s}", C_DIM))
+            print(color(f"    (will take effect on next message)", C_DIM))
+        elif resolved:
+            # 启用单个 skill
+            if resolved in active:
+                print(color(f"  Skill '{resolved}' is already active.", C_YELLOW))
+                return
+            active.append(resolved)
+            config["active_skills"] = active
+            save_config(config)
+            print(color(f"  ✓ Skill '{resolved}' enabled.", C_GREEN))
+            print(color(f"    (will take effect on next message)", C_DIM))
+        else:
+            print(color(f"  ✗ Skill or namespace not found: {subarg}", C_RED))
+            print(color(f"  Use /skill list to see available skills.", C_DIM))
+
+    elif subcmd == "disable":
+        if not subarg:
+            print(color("  Usage: /skill disable <name|namespace>", C_RED))
+            return
+
+        resolved = resolve_skill_name(subarg, cwd)
+
+        # 检查是否是命名空间
+        namespaces = list_namespaces(cwd)
+        ns_names = [n["namespace"] for n in namespaces]
+        is_namespace = subarg in ns_names
+
+        if is_namespace:
+            # 禁用整个命名空间
+            ns_skills = get_namespace_skills(subarg, cwd)
+            removed = [s for s in ns_skills if s in active]
+            if not removed:
+                print(color(f"  No skills in '{subarg}' are active.", C_YELLOW))
+                return
+            for s in removed:
+                active.remove(s)
+            config["active_skills"] = active
+            save_config(config)
+            print(color(f"  ✓ Disabled namespace '{subarg}' ({len(removed)} skills):", C_GREEN))
+            for s in removed:
+                print(color(f"    - {s}", C_DIM))
+        elif resolved:
+            # 禁用单个 skill
+            if resolved not in active:
+                print(color(f"  Skill '{resolved}' is not active.", C_YELLOW))
+                return
+            active.remove(resolved)
+            config["active_skills"] = active
+            save_config(config)
+            print(color(f"  ✓ Skill '{resolved}' disabled.", C_GREEN))
+        else:
+            print(color(f"  ✗ Skill or namespace not found: {subarg}", C_RED))
+            print(color(f"  Use /skill list to see available skills.", C_DIM))
+
+    else:
+        print(color("  Usage:", C_YELLOW))
+        print(color("    /skill list              List available skills", C_DIM))
+        print(color("    /skill info <name>       Show skill details", C_DIM))
+        print(color("    /skill enable <name>     Enable a skill or namespace", C_DIM))
+        print(color("    /skill disable <name>    Disable a skill or namespace", C_DIM))
 
 
 # ===== 斜杠命令处理 =====
@@ -205,6 +373,9 @@ def handle_command(cmd_raw: str, state: AgentState, config: dict) -> bool:
         print(f"  Permission mode: {config.get('permission_mode', 'normal')}")
         print(f"  Messages: {len(state.messages)}")
         print(f"  Turn count: {state.turn_count}")
+        active = config.get("active_skills", [])
+        if active:
+            print(f"  Active skills: {', '.join(active)}")
 
     elif cmd == "/save":
         name = arg or auto_save_name()
@@ -285,6 +456,9 @@ def handle_command(cmd_raw: str, state: AgentState, config: dict) -> bool:
             print(color(f"  ✓ Working directory: {config['cwd']}", C_GREEN))
         else:
             print(color(f"  ✗ Directory not found: {arg}", C_RED))
+
+    elif cmd == "/skill":
+        _handle_skill_command(arg, config)
 
     else:
         print(color(f"  Unknown command: {cmd}", C_RED))

@@ -18,9 +18,6 @@ DEFAULT_API_KEY = "sk-qauQRlz8FeTFqBoxGV7IHdErlhetZun5RA7jhXnmKZlDAHQF"
 
 # 单次回复的最大输出 token 数
 # 历史演进：4096 (GPT-3.5 时代) → 8192 (够用但聊嗨会断) → 16384 (当前)
-# 已实测 cixtech 端点接受到 131072 也不报错，但模型实际能稳定生成的长度
-# 通常在 16K-32K 区间，再高会变慢且不一定真的输出那么多。
-# 短回答场景设小一点更快；长文档生成可以调到 32768。
 DEFAULT_MAX_TOKENS = 16384
 
 # 为了向后兼容（main.py 还引用了 PROVIDER_CONFIG 和 detect_provider）
@@ -38,8 +35,22 @@ def detect_provider(model: str) -> str:
     return "deepseek"
 
 
+def _load_saved_active_skills() -> list[str]:
+    """从 config.json 加载已持久化的 active_skills"""
+    config_file = CONFIG_DIR / "config.json"
+    if config_file.exists():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            skills = data.get("active_skills", [])
+            if isinstance(skills, list):
+                return skills
+        except Exception:
+            pass
+    return []
+
+
 def load_config(cwd: str = None) -> dict:
-    """加载配置，优先级：环境变量 > .env 文件 > 内置默认值"""
+    """加载配置，优先级：环境变量 > config.json > .env 文件 > 内置默认值"""
     # 加载 .env 文件（多个位置查找）
     load_dotenv(PROJECT_DIR / ".env")          # 脚本所在目录的 .env
     load_dotenv(Path(cwd or ".") / ".env")     # 工作目录的 .env
@@ -50,6 +61,13 @@ def load_config(cwd: str = None) -> dict:
     api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("AGENT_API_KEY") or DEFAULT_API_KEY
     base_url = os.getenv("AGENT_BASE_URL", BASE_URL)
 
+    # active_skills: 环境变量（逗号分隔）> config.json 持久化值
+    env_skills = os.getenv("AGENT_ACTIVE_SKILLS", "")
+    if env_skills:
+        active_skills = [s.strip() for s in env_skills.split(",") if s.strip()]
+    else:
+        active_skills = _load_saved_active_skills()
+
     config = {
         "model": model,
         "provider": "deepseek",
@@ -59,6 +77,7 @@ def load_config(cwd: str = None) -> dict:
         "permission_mode": os.getenv("AGENT_PERMISSION", "normal"),  # normal | accept-all
         "max_tokens": int(os.getenv("AGENT_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         "temperature": float(os.getenv("AGENT_TEMPERATURE", "0.7")),
+        "active_skills": active_skills,
     }
 
     return config
@@ -68,5 +87,5 @@ def save_config(config: dict):
     """保存配置到 ~/.my_agent/config.json"""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_file = CONFIG_DIR / "config.json"
-    saveable = {k: v for k, v in config.items() if isinstance(v, (str, int, float, bool))}
+    saveable = {k: v for k, v in config.items() if isinstance(v, (str, int, float, bool, list))}
     config_file.write_text(json.dumps(saveable, indent=2, ensure_ascii=False), encoding="utf-8")
