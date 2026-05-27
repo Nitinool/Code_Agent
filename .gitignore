@@ -36,3 +36,7 @@ desktop.ini
 
 # Logs
 *.log
+
+# Sensitive / temporary
+cookie
+config/
