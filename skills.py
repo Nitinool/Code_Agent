@@ -49,17 +49,104 @@ _FRONTMATTER_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
 
 
 def _parse_simple_yaml(text: str) -> dict:
-    """解析极简 YAML：只支持 key: value 格式（单行），不支持嵌套/列表/引号"""
+    """
+    解析极简 YAML frontmatter。
+    支持：
+      - key: value（单行）
+      - key: "value" / key: 'value'（引号）
+      - key: >（折叠块标量，后续缩进行用空格连接）
+      - key: |（字面块标量，后续缩进行用换行连接）
+      - 列表项（- item）
+    不支持：深层嵌套、锚点、标签等高级特性。
+    """
     result = {}
-    for line in text.strip().split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # 跳过空行和注释
+        if not stripped or stripped.startswith("#"):
+            i += 1
             continue
-        if ":" in line:
-            key, _, value = line.partition(":")
+
+        # 列表项: - value
+        if stripped.startswith("- "):
+            # 简单收集到列表
+            list_key = None
+            for existing_key in result:
+                if isinstance(result[existing_key], list):
+                    list_key = existing_key
+                    break
+            if list_key is None:
+                # 没有已有列表，跳过（我们不处理顶层列表）
+                pass
+            else:
+                item = stripped[2:].strip().strip('"').strip("'")
+                result[list_key].append(item)
+            i += 1
+            continue
+
+        # 子列表项（缩进的 - item）
+        if line.startswith("  - ") or line.startswith("    - "):
+            item = stripped[1:].strip().strip('"').strip("'")
+            # 找到最近的非列表 key，追加
+            for existing_key in reversed(list(result.keys())):
+                if isinstance(result[existing_key], list):
+                    result[existing_key].append(item)
+                    break
+            i += 1
+            continue
+
+        # key: value 行
+        if ":" in stripped:
+            key, _, rest = stripped.partition(":")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            rest = rest.strip()
+
+            # 块标量: key: > 或 key: |
+            if rest in (">", "|"):
+                block_style = rest  # ">" = folded, "|" = literal
+                # 收集后续缩进行
+                i += 1
+                block_lines = []
+                # 确定基础缩进（下一行的前导空格数）
+                while i < len(lines):
+                    next_line = lines[i]
+                    if next_line.strip() == "":
+                        # 空行：literal 保留，folded 也保留（作为段落分隔）
+                        block_lines.append("")
+                        i += 1
+                        continue
+                    # 检查是否有缩进（至少 2 空格）
+                    if next_line.startswith("  ") or next_line.startswith("\t"):
+                        block_lines.append(next_line.strip())
+                        i += 1
+                    else:
+                        # 缩进结束
+                        break
+
+                if block_style == ">":
+                    # 折叠：用空格连接，空行变成段落分隔
+                    value = " ".join(block_lines)
+                    # 合并多余空格
+                    value = re.sub(r'\s+', ' ', value).strip()
+                else:
+                    # 字面：用换行连接
+                    value = "\n".join(block_lines)
+                result[key] = value
+                continue
+
+            # 普通值
+            value = rest.strip().strip('"').strip("'")
             result[key] = value
+        else:
+            # 可能是列表值的一部分或缩进内容
+            pass
+
+        i += 1
+
     return result
 
 
