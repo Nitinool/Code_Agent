@@ -1,9 +1,9 @@
 # 🤖 My Agent — AI Coding Assistant
 
-一个极简的命令行 AI 编程助手 —— **单文件 Agent 循环 + 5 个核心工具 + 流式 REPL**。
+一个极简的命令行 AI 编程助手 —— **Agent 循环 + 7 个工具 + 流式 REPL + Skills 系统**。
 默认走 **DeepSeek-V4-Pro**（cixtech 端点，OpenAI 兼容协议），开箱即用。
 
-> 设计哲学：**少即是多**。整个项目 9 个 Python 文件，没有插件系统、没有 MCP、没有 sub-agent —— 只有一个能稳定干活的 Agent 循环。
+> 设计哲学：**少即是多**。没有插件系统、没有 MCP、没有 sub-agent —— 只有一个能稳定干活的 Agent 循环。
 
 ## ✨ 核心特性
 
@@ -14,6 +14,9 @@
 - 💾 **会话持久化** — 保存/加载/列出/删除，退出时自动存档到 `~/.my_agent/sessions/`
 - 📏 **截断感知** — 输出撞到 `max_tokens` 上限时显式提示用户（不再静默截断）
 - 🪟 **Windows 友好** — 启动时自动修复 stdout/stderr 编码为 UTF-8
+- 🧩 **Skills 系统** — 可插拔的技能模块，按命名空间组织，支持运行时启用/禁用
+- 🎨 **图片生成** — 集成硅基流动 API，支持 5 种文生图模型
+- 🔊 **语音合成** — 集成 MiMo-V2.5-TTS，支持预置音色/音色设计/音色复刻
 
 ## 📦 安装
 
@@ -39,6 +42,12 @@ AGENT_BASE_URL=https://aihub.cixtech.com/v1   # 可选
 AGENT_MAX_TOKENS=16384                # 可选，长文档可调到 32768
 AGENT_TEMPERATURE=0.7                 # 可选
 AGENT_PERMISSION=normal               # normal | accept-all
+
+# 图片生成（硅基流动）
+SILICONFLOW_API_KEY=sk-xxxxx          # 可选，用于 ImageGen 工具
+
+# 语音合成（小米 MiMo）
+MIMO_API_KEY=sk-xxxxx                 # 可选，用于 TTS 工具
 ```
 
 > 💡 **关于 `AGENT_MAX_TOKENS`**：这是**单次回复**的输出上限，不是上下文窗口。
@@ -80,8 +89,14 @@ python main.py --model deepseek-v4-pro    # 指定模型
 | `/accept-all` | 切换为自动放行模式 |
 | `/normal` | 切换为询问模式 |
 | `/cwd <path>` | 修改工作目录 |
+| `/skill list` | 列出所有可用技能 |
+| `/skill info <name>` | 查看技能详情 |
+| `/skill enable <name>` | 启用技能或命名空间 |
+| `/skill disable <name>` | 禁用技能或命名空间 |
 
-## 🛠️ 内置工具（5 个）
+## 🛠️ 内置工具（7 个）
+
+### 文件操作
 
 | 工具 | 用途 | 权限 |
 | --- | --- | --- |
@@ -90,6 +105,20 @@ python main.py --model deepseek-v4-pro    # 指定模型
 | `Grep` | 在源码文件中搜索正则（限定常见代码/文本后缀，最多返回 50 条） | 自动放行（只读） |
 | `Write` | 写入/创建文件（自动创建父目录，**覆盖**写入） | 需要确认 |
 | `Bash` | 执行 Shell 命令（默认 30s 超时） | 安全前缀自动放行，其他需确认 |
+
+### 图片生成（硅基流动）
+
+| 工具 | 用途 | 权限 |
+| --- | --- | --- |
+| `ImageGen` | 文生图，支持 5 种模型（z-image-turbo / z-image / ernie-image / kolors / qwen-image） | 需要确认 |
+| `ImageModels` | 列出所有可用的文生图模型 | 自动放行（只读） |
+
+### 语音合成（MiMo-V2.5-TTS）
+
+| 工具 | 用途 | 权限 |
+| --- | --- | --- |
+| `TTS` | 文本转语音，支持预置音色/音色设计/音色复刻 | 需要确认 |
+| `TTSVoices` | 列出所有可用的预置音色 | 自动放行（只读） |
 
 ### Bash 安全前缀白名单
 
@@ -103,6 +132,36 @@ echo which pwd whoami env type
 ```
 
 > 工具输出超过 32000 字符会自动头尾截断，防止上下文爆炸。
+
+## 🧩 Skills 系统
+
+Skills 是可插拔的技能模块，按 `skills/<namespace>/<name>/SKILL.md` 组织。启用后，技能内容会自动注入 System Prompt。
+
+### 内置技能
+
+| 命名空间 | 技能数 | 说明 |
+| --- | --- | --- |
+| `agent-reach` | 6 | 求职/社交/开发/搜索等场景技能 |
+| `superpowers` | 12 | 开发方法论：TDD、调试、代码审查、计划编写等 |
+
+### 使用示例
+
+```bash
+# 列出所有技能
+/skill list
+
+# 查看技能详情
+/skill info brainstorming
+
+# 启用单个技能
+/skill enable brainstorming
+
+# 启用整个命名空间
+/skill enable superpowers
+
+# 禁用
+/skill disable brainstorming
+```
 
 ## 🧠 上下文管理
 
@@ -148,17 +207,26 @@ echo which pwd whoami env type
 
 ```
 Code_Agent/
-├── main.py          # REPL 入口、斜杠命令、事件渲染、ANSI 着色
-├── agent.py         # Agent 主循环（generator 事件流，最多 30 轮）
-├── providers.py     # OpenAI SDK 流式封装 + 消息/工具格式转换 + 截断检测
-├── tools.py         # 工具注册表 + 5 个内置工具实现
-├── context.py       # System Prompt 构建（注入日期/cwd/平台/git/CLAUDE.md）
-├── permissions.py   # 三段式权限管道
-├── compact.py       # 两级上下文压缩
-├── session.py       # 会话保存/加载/列出/删除
-├── config.py        # 配置加载（环境变量 > .env > 内置默认）
+├── main.py              # REPL 入口、斜杠命令、事件渲染、ANSI 着色
+├── agent/               # Agent 核心模块
+│   ├── agent.py         # Agent 主循环（generator 事件流，最多 30 轮）
+│   ├── providers.py     # OpenAI SDK 流式封装 + 消息/工具格式转换 + 截断检测
+│   ├── tools.py         # 工具注册表（已废弃，见 tools/）
+│   ├── context.py       # System Prompt 构建（注入日期/cwd/平台/git/CLAUDE.md）
+│   ├── permissions.py   # 三段式权限管道
+│   ├── compact.py       # 两级上下文压缩
+│   ├── session.py       # 会话保存/加载/列出/删除
+│   ├── config.py        # 配置加载（环境变量 > .env > 内置默认）
+│   └── skills.py        # Skills 系统（加载/解析/注入）
+├── tools/               # 工具实现
+│   ├── tools.py         # 工具注册表 + 文件/命令工具（Read/Write/Bash/Glob/Grep）
+│   ├── image_gen.py     # 图片生成（硅基流动 API）
+│   └── tts.py           # 语音合成（MiMo-V2.5-TTS API）
+├── skills/              # 技能模块
+│   ├── agent-reach/     # 求职/社交/开发等场景技能
+│   └── superpowers/     # 开发方法论技能（TDD/调试/代码审查等）
+├── claude.md            # 项目规则（自动注入 System Prompt）
 ├── requirements.txt
-├── .env.example
 └── README.md
 ```
 
