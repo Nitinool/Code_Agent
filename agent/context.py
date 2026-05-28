@@ -15,17 +15,6 @@ SYSTEM_PROMPT_TEMPLATE = """You are a helpful coding assistant with access to to
 - Platform: {platform}
 {git_info}
 
-## Available Tools
-
-### File Operations
-- **Read**: Read file contents
-- **Write**: Write content to files (full content overwrite)
-- **Glob**: List files by pattern (e.g., '**/*.py')
-- **Grep**: Search file contents by regex
-
-### Execution
-- **Bash**: Execute shell commands (run tests, install dependencies, git operations, etc.)
-
 ## Rules
 - Always read files before editing them.
 - When writing files, provide the COMPLETE file content, not just changes.
@@ -89,7 +78,7 @@ def build_system_prompt(config: dict) -> str:
     active_names = config.get("active_skills", [])
     if active_names:
         try:
-            from skills import get_active_skill_contents
+            from agent.skills import get_active_skill_contents
             skills_content = get_active_skill_contents(active_names, cwd)
             if skills_content:
                 active_skills = f"\n## Active Skills\n\nThe following skills are active. Follow their instructions carefully.\n{skills_content}"

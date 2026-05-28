@@ -14,7 +14,7 @@ CONFIG_DIR = Path.home() / ".my_agent"
 # DeepSeek-V4-Pro（OpenAI 兼容协议）
 BASE_URL = "https://aihub.cixtech.com/v1"
 DEFAULT_MODEL = "deepseek-v4-pro"
-DEFAULT_API_KEY = "sk-qauQRlz8FeTFqBoxGV7IHdErlhetZun5RA7jhXnmKZlDAHQF"
+DEFAULT_API_KEY = ""
 
 # 单次回复的最大输出 token 数
 # 历史演进：4096 (GPT-3.5 时代) → 8192 (够用但聊嗨会断) → 16384 (当前)
@@ -52,13 +52,18 @@ def _load_saved_active_skills() -> list[str]:
 def load_config(cwd: str = None) -> dict:
     """加载配置，优先级：环境变量 > config.json > .env 文件 > 内置默认值"""
     # 加载 .env 文件（多个位置查找）
-    load_dotenv(PROJECT_DIR / ".env")          # 脚本所在目录的 .env
-    load_dotenv(Path(cwd or ".") / ".env")     # 工作目录的 .env
-    load_dotenv(CONFIG_DIR / ".env")           # ~/.my_agent/.env
+    load_dotenv(PROJECT_DIR.parent / "config" / ".env")   # config/ 目录的 .env
+    load_dotenv(Path(cwd or ".") / "config" / ".env")     # 工作目录下 config/ 的 .env
+    load_dotenv(CONFIG_DIR / ".env")                       # ~/.my_agent/.env
 
     # 允许用环境变量覆盖
     model = os.getenv("AGENT_MODEL", DEFAULT_MODEL)
-    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("AGENT_API_KEY") or DEFAULT_API_KEY
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("AGENT_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "未设置 API Key！请在 config/.env 中设置 DEEPSEEK_API_KEY，"
+            "或设置环境变量 DEEPSEEK_API_KEY / AGENT_API_KEY"
+        )
     base_url = os.getenv("AGENT_BASE_URL", BASE_URL)
 
     # active_skills: 环境变量（逗号分隔）> config.json 持久化值
@@ -68,16 +73,24 @@ def load_config(cwd: str = None) -> dict:
     else:
         active_skills = _load_saved_active_skills()
 
+    # MiMo TTS API Key（可选，用于语音合成功能）
+    mimo_api_key = os.getenv("MIMO_API_KEY", "")
+
+    # SiliconFlow API Key（可选，用于图片生成功能）
+    siliconflow_api_key = os.getenv("SILICONFLOW_API_KEY", "")
+
     config = {
         "model": model,
         "provider": "deepseek",
         "api_key": api_key,
         "base_url": base_url,
         "cwd": cwd or os.getcwd(),
-        "permission_mode": os.getenv("AGENT_PERMISSION", "normal"),  # normal | accept-all
+        "permission_mode": os.getenv("AGENT_PERMISSION", "accept-all"),  # normal | accept-all
         "max_tokens": int(os.getenv("AGENT_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         "temperature": float(os.getenv("AGENT_TEMPERATURE", "0.7")),
         "active_skills": active_skills,
+        "mimo_api_key": mimo_api_key,
+        "siliconflow_api_key": siliconflow_api_key,
     }
 
     return config

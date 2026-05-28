@@ -145,7 +145,7 @@ def summary_compact(state, config: dict):
 def _llm_summarize(messages: list[dict], config: dict) -> str:
     """用 LLM 总结旧消息历史"""
     try:
-        from providers import call_llm
+        from agent.providers import call_llm
         
         # 构建摘要请求
         conversation_text = _messages_to_text(messages)

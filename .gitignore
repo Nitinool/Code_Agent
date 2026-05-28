@@ -40,3 +40,9 @@ desktop.ini
 # Sensitive / temporary
 cookie
 config/
+
+# Generated test output (images, audio)
+*.png
+*.wav
+*.mp3
+*.pcm16

@@ -221,7 +221,11 @@ def _search_files(params: dict, config: dict) -> str:
 # ===== 注册所有内置工具 =====
 
 def register_builtin_tools():
-    """注册所有内置工具：Read / Write / Bash / Glob / Grep"""
+    """注册所有内置工具：Read / Write / Bash / Glob / Grep / TTS / ImageGen"""
+
+    # 延迟导入 TTS 工具，避免循环依赖
+    from tools.tts import tts_synthesize, tts_list_voices
+    from tools.image_gen import image_generate, image_list_models
 
     register(ToolDef(
         name="Read",
@@ -316,5 +320,107 @@ def register_builtin_tools():
             "required": ["pattern"],
         },
         func=_search_files,
+        read_only=True,
+    ))
+
+    # ===== TTS 语音合成工具 =====
+    register(ToolDef(
+        name="TTS",
+        description="Synthesize text to speech using MiMo-V2.5-TTS. Converts text into natural-sounding audio. Supports multiple preset voices (冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean), voice design via text description, and voice cloning from audio samples. Output is saved as a WAV/MP3/PCM16 audio file.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text content to synthesize into speech",
+                },
+                "voice": {
+                    "type": "string",
+                    "description": "Voice name or Voice ID. Preset voices: 冰糖, 茉莉, 苏打, 白桦, Mia, Chloe, Milo, Dean. Default: 冰糖",
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Natural language style description, e.g. '轻快上扬的语调，语速稍快，带着激动' or '低沉磁性，像深夜电台主播'. Also supports director mode with 角色/场景/指导 sections.",
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output audio format: wav, mp3, or pcm16. Default: wav",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output file path. Default: tts_output.wav",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "TTS model to use. mimo-v2.5-tts (preset voices), mimo-v2.5-tts-voicedesign (text-based voice design), mimo-v2.5-tts-voiceclone (voice cloning from sample). Default: mimo-v2.5-tts",
+                },
+                "voice_sample": {
+                    "type": "string",
+                    "description": "Path to an audio sample file for voice cloning (only needed with mimo-v2.5-tts-voiceclone model)",
+                },
+            },
+            "required": ["text"],
+        },
+        func=tts_synthesize,
+        read_only=False,
+    ))
+
+    register(ToolDef(
+        name="TTSVoices",
+        description="List all available preset voices for MiMo-V2.5-TTS speech synthesis.",
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        func=tts_list_voices,
+        read_only=True,
+    ))
+
+    # ===== Image Generation 图片生成工具 =====
+    register(ToolDef(
+        name="ImageGen",
+        description="Generate images from text descriptions using SiliconFlow API. Supports multiple models: z-image-turbo (fast, default), z-image (high quality), ernie-image, kolors, qwen-image. Output is saved as a PNG file.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Text description of the image to generate (supports both Chinese and English)",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model name. Options: z-image-turbo (fast, default), z-image (high quality), ernie-image, kolors, qwen-image",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "Image size. Options: 1024x1024 (default), 1024x768, 768x1024, 512x512, 768x768",
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "Number of images to generate (1-4, default: 1)",
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    "description": "Negative prompt — describe what you DON'T want in the image (optional)",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output file path. Default: generated_image.png",
+                },
+            },
+            "required": ["prompt"],
+        },
+        func=image_generate,
+        read_only=False,
+    ))
+
+    register(ToolDef(
+        name="ImageModels",
+        description="List all available image generation models on SiliconFlow.",
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        func=image_list_models,
         read_only=True,
     ))

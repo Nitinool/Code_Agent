@@ -14,18 +14,18 @@ if sys.platform == "win32":
 # 确保可以导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tools import register_builtin_tools
+from tools.tools import register_builtin_tools
 register_builtin_tools()
 
-from config import load_config, save_config, detect_provider, PROVIDER_CONFIG
-from agent import (
+from agent.config import load_config, save_config, detect_provider, PROVIDER_CONFIG
+from agent.agent import (
     AgentState, run_agent_turn,
     TextEvent, ThinkingEvent, ToolCallEvent, ToolResultEvent,
     PermissionRequestEvent, TurnEndEvent, DoneEvent,
 )
-from permissions import format_permission_request
-from session import save_session, load_session, list_sessions, delete_session, auto_save_name
-from skills import list_skills, list_namespaces, resolve_skill_name, load_skills, get_namespace_skills
+from agent.permissions import format_permission_request
+from agent.session import save_session, load_session, list_sessions, delete_session, auto_save_name
+from agent.skills import list_skills, list_namespaces, resolve_skill_name, load_skills, get_namespace_skills
 
 
 # ===== UI 颜色（ANSI）=====
@@ -148,6 +148,13 @@ def render_events(events_generator, state):
                 print(color(f" → {event.params['pattern']}", C_DIM))
             elif event.name == "Grep" and "pattern" in event.params:
                 print(color(f" → /{event.params['pattern']}/", C_DIM))
+            elif event.name == "ImageGen" and "prompt" in event.params:
+                prompt_preview = event.params['prompt'][:60]
+                model = event.params.get('model', 'z-image-turbo')
+                print(color(f" → \"{prompt_preview}...\" ({model})", C_DIM))
+            elif event.name == "TTS" and "text" in event.params:
+                text_preview = event.params['text'][:50]
+                print(color(f" → \"{text_preview}...\"", C_DIM))
             else:
                 print()
             printed_marker = False
@@ -206,7 +213,7 @@ def _handle_skill_command(arg: str, config: dict) -> None:
             ns_status = color("✓", C_GREEN) if a_count == count else color(f"{a_count}/{count}", C_YELLOW) if a_count > 0 else color("○", C_DIM)
             print(f"  {ns_status} {color(ns, C_BOLD)} ({count} skills)")
             for full_name in ns_info["skills"]:
-                from skills import get_skill
+                from agent.skills import get_skill
                 s = get_skill(full_name, cwd)
                 if s:
                     s_status = color("✓", C_GREEN) if full_name in active else color("○", C_DIM)
@@ -223,7 +230,7 @@ def _handle_skill_command(arg: str, config: dict) -> None:
         if not resolved:
             print(color(f"  ✗ Skill not found: {subarg}", C_RED))
             return
-        from skills import get_skill
+        from agent.skills import get_skill
         skill = get_skill(resolved, cwd)
         if not skill:
             print(color(f"  ✗ Skill not found: {resolved}", C_RED))

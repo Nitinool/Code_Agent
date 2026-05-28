@@ -1,7 +1,7 @@
 # permissions.py — 权限控制
 # 三步管道：模式检查 → 白名单放行 → 安全命令前缀 → 询问用户
 
-from providers import ToolCall
+from agent.providers import ToolCall
 
 # 只读工具白名单（自动放行）
 READONLY_TOOLS = {"Read", "Glob", "Grep"}

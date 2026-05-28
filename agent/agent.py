@@ -4,11 +4,11 @@
 from dataclasses import dataclass, field
 from typing import Generator
 
-from providers import stream_llm, TextChunk, ThinkingChunk, ToolCall, AssistantTurn
-from tools import execute_tool, get_tool_schemas
-from permissions import check_permission, format_permission_request
-from context import build_system_prompt
-from compact import maybe_compact
+from agent.providers import stream_llm, TextChunk, ThinkingChunk, ToolCall, AssistantTurn
+from tools.tools import execute_tool, get_tool_schemas
+from agent.permissions import check_permission, format_permission_request
+from agent.context import build_system_prompt
+from agent.compact import maybe_compact
 
 
 # ===== Agent 状态 =====
